@@ -10,7 +10,7 @@
  */
 
 #include <linux/ethtool.h>
-#ifdef NOW_SUPPORTED
+#ifdef CONFIG_PHY_OF
 #include <linux/export.h>
 #include <linux/gpio/consumer.h>
 #else
@@ -64,7 +64,7 @@ struct phylink {
 
 	/* The link configuration settings */
 	struct phylink_link_state link_config;
-#ifdef NOW_SUPPORTED
+#ifdef CONFIG_PHY_OF
 	struct gpio_desc *link_gpio;
 #else
 	int link_gpio;
@@ -101,7 +101,10 @@ static int phylink_parse_fixedlink(struct phylink *pl, struct fixed_phy_status *
 	else
 		speed = SPEED_1000;
 
-	pl->link_an_mode = MLO_AN_PHY;
+	if (pl->mdio_phy)
+		pl->link_an_mode = MLO_AN_PHY;
+	else
+		pl->link_an_mode = MLO_AN_FIXED;
 	pl->link_config.link = 0;
 	pl->link_config.speed = speed;
 	pl->link_config.duplex = DUPLEX_HALF;
@@ -117,19 +120,9 @@ static int phylink_parse_fixedlink(struct phylink *pl, struct fixed_phy_status *
 			pl->link_config.pause |= MLO_PAUSE_SYM;
 		if (np->asym_pause)
 			pl->link_config.pause |= MLO_PAUSE_ASYM;
-	} else {
-		/* for max24287 */
-		pl->link_config.duplex = DUPLEX_FULL;
-//		pl->link_config.pause |= MLO_PAUSE_SYM;
-///* NOTE: Boris-Ben Shapiro (2017-01-09):		pl->link_config.pause = (MLO_PAUSE_SYM | MLO_PAUSE_ASYM);	*/
-		pl->link_config.pause = (MLO_PAUSE_SYM | MLO_PAUSE_ASYM);
-		pl->link_config.an_complete = 1;
 	}
 
-
-
-
-#ifdef NOW_SUPPORTED
+#ifdef CONFIG_PHY_OF
 	fixed_node = of_get_child_by_name(np, "fixed-link");
 	if (fixed_node) {
 		struct gpio_desc *desc;
@@ -227,7 +220,7 @@ static int phylink_parse_fixedlink(struct phylink *pl, struct fixed_phy_status *
 }
 
 
-#ifdef NOW_SUPPORTED
+#ifdef CONFIG_PHY_OF
 static int phylink_parse_managed(struct phylink *pl, struct device_node *np)
 {
 	const char *managed;
@@ -276,10 +269,9 @@ static void phylink_get_fixed_state(struct phylink *pl, struct phylink_link_stat
 {
 	*state = pl->link_config;
 	if (pl->link_gpio != 0) {
-#ifdef NOW_SUPPORTED
+#ifdef CONFIG_PHY_OF
 		state->link = !!gpiod_get_value(pl->link_gpio);
 #else
-//		state->link = !!gpio_get_value(pl->link_gpio);
 		if (pl->mdio_phy)
 			state->link = pl->mdio_phy->link;
 		else
@@ -355,8 +347,6 @@ static void phylink_resolve(struct work_struct *w)
 		switch (pl->link_an_mode) {
 		case MLO_AN_PHY:
 			link_state = pl->phy_state;
-//			printk(KERN_ERR "%s: PHYMODE: link state %d, sync %d, an_en %d, an_comp %d\n", __func__, 
-//							link_state.link, link_state.sync, link_state.an_enabled, link_state.an_complete);
 			phylink_resolve_flow(pl, &link_state);
 			break;
 
@@ -376,22 +366,18 @@ static void phylink_resolve(struct work_struct *w)
 			break;
 		}
 	}
-	netdev_dbg(pl->netdev, "SM: link state %d, netif %d. mode %s", link_state.link, netif_carrier_ok(ndev), phylink_an_mode_str(pl->link_an_mode));
+
 	if (link_state.link != netif_carrier_ok(ndev)) {
 		if (!link_state.link) {
 			netif_carrier_off(ndev);
 			pl->ops->mac_link_down(ndev, pl->link_an_mode);
 			netdev_info(ndev, "Link is Down\n");
 		} else {
-			netdev_dbg(pl->netdev, "Link is Up. mode %s\n", phylink_an_mode_str(pl->link_an_mode));
 			/* If we're using PHY autonegotiation, we need to keep
 			 * the MAC updated with the current link parameters.
 			 */
-			if (pl->link_an_mode == MLO_AN_PHY) {
-//				printk(KERN_ERR "%s-%d: configring mac for MLO_AN_PHY. speed %d, duplex %d, advertising %d\n", __func__, __LINE__, 
-//											link_state.speed, link_state.duplex, link_state.advertising);
+			if (pl->link_an_mode == MLO_AN_PHY)
 				pl->ops->mac_config(ndev, MLO_AN_PHY, &link_state);
-			}
 			#ifdef ETHTOOL_EEE
 			pl->ops->mac_link_up(ndev, pl->link_an_mode, pl->phydev);
 			#else
@@ -413,16 +399,15 @@ static void phylink_resolve(struct work_struct *w)
 static void phylink_run_resolve(struct phylink *pl)
 {
 	if (!pl->phylink_disable_state) {
-#ifdef NOW_SUPPORTED
+#ifdef CONFIG_PHY_OF
 		queue_work(system_power_efficient_wq, &pl->resolve);
 #else
-//		queue_work(system_wq, &pl->resolve);
 		schedule_work(&pl->resolve);
 #endif
 	}
 }
 
-#ifdef NOW_SUPPORTED
+#ifdef CONFIG_PHY_OF
 struct phylink *phylink_create(struct net_device *ndev, struct device_node *np, phy_interface_t iface, const struct phylink_mac_ops *ops)
 #else
 struct phylink *phylink_create(struct net_device *ndev, struct fixed_phy_status *np, phy_interface_t iface, const struct phylink_mac_ops *ops)
@@ -463,8 +448,7 @@ struct phylink *phylink_create(struct net_device *ndev, struct fixed_phy_status 
 	}
 	#endif
 
-/* NOTE: Boris-Ben Shapiro (2016-08-14):	ret = pl->ops->mac_get_support(pl->netdev, pl->link_an_mode, */
-	ret = pl->ops->mac_get_support(pl->netdev, MLO_AN_PHY,	/* CPSW always has phy */
+	ret = pl->ops->mac_get_support(pl->netdev, pl->link_an_mode,
 				       &pl->link_config);
 	if (ret) {
 		kfree(pl);
@@ -531,7 +515,7 @@ static int phylink_bringup_phy(struct phylink *pl, struct phy_device *phy)
 			    pl->link_config.advertising;
 	mutex_unlock(&pl->state_mutex);
 
-#ifdef NOW_SUPPORTED
+#ifdef CONFIG_PHY_OF
 	phy_start_machine(phy);
 #else
 	phy_start_machine(phy, NULL);
@@ -722,7 +706,6 @@ static int phylink_ethtool_gset(struct phylink *pl, struct ethtool_cmd *cmd)
 	struct phylink_link_state link_state;
 	int ret;
 
-	netdev_dbg(pl->netdev, "mode %s for phyad 0x%02x", phylink_an_mode_str(pl->link_an_mode), cmd->phy_address);
 	BUG_ON(!pl->mdio_phy);
 
 	ret = phy_ethtool_gset(pl->mdio_phy, cmd);
@@ -731,7 +714,6 @@ static int phylink_ethtool_gset(struct phylink *pl, struct ethtool_cmd *cmd)
 
 	/* If the SFP media SOC contains a PHY than we should reduce the supported features to ones that this phy supports */
 	if (pl->phydev) {
-		netdev_dbg(pl->netdev, "Will get settings for phy add 0x%02x\n", pl->phydev->addr);
 		ret = phy_ethtool_gsetreduce(pl->phydev, cmd);
 		if (ret)
 			return ret;
@@ -743,15 +725,6 @@ static int phylink_ethtool_gset(struct phylink *pl, struct ethtool_cmd *cmd)
 		cmd->port |= PORT_FIBRE;
 	else
 		cmd->port |= PORT_TP;
-
-	#if 0
-	else {
-		netdev_dbg(pl->netdev, "No phy. link port support 0x%08x. link port 0x%02x. l support 0x%08x", pl->link_port_support, pl->link_port, pl->link_config.supported);
-		cmd->supported = pl->link_port_support;
-		cmd->transceiver = XCVR_EXTERNAL;
-		cmd->port = pl->link_port;
-	}
-	#endif
 
 	switch (pl->link_an_mode) {
 	case MLO_AN_FIXED:
@@ -808,11 +781,8 @@ static int phylink_ethtool_sset(struct phylink *pl, struct ethtool_cmd *cmd)
 	/* Calculate the union of the MAC support and attached phy support */
 	supported = (pl->link_config.supported & pl->mdio_phy->supported);
 	if (pl->phydev) {
-		pr_debug("Concatenating phylink supported 0x%08x with SFP phy features 0x%08x\n", supported, pl->phydev->supported);
 		supported &= pl->phydev->supported;
-	}
 
-	pr_debug("Will mask current adv features 0x%08x with 0x%08x\n", cmd->advertising, supported);
 	/* Mask out unsupported advertisments */
 	cmd->advertising &= supported;
 
@@ -833,25 +803,21 @@ static int phylink_ethtool_sset(struct phylink *pl, struct ethtool_cmd *cmd)
 
 		cmd->advertising |= ADVERTISED_Autoneg;
 	}
-	pr_debug("%s now adverstising 0x%08x. autoneg %d, speed %d (%d), duplex %d\n", __func__, cmd->advertising, cmd->autoneg, ethtool_cmd_speed(cmd), pl->link_config.speed, 
-					cmd->duplex);
+
 	/* If we have a fixed link (as specified by firmware), refuse
 	 * to enable autonegotiation, or change link parameters.
 	 */
 	if (pl->link_an_mode == MLO_AN_FIXED) {
-		pr_debug("%s testing fixed\n",__func__);
 		if (cmd->autoneg != AUTONEG_DISABLE ||
 		    ethtool_cmd_speed(cmd) != pl->link_config.speed ||
 		    cmd->duplex != pl->link_config.duplex)
 			return -EINVAL;
 	}
 
-	pr_debug("willll configure phy addr 0x%02x. cmd 0x%02x\n", (pl->phydev) ? (pl->phydev->addr) : 0x0, cmd->phy_address);
 	/* If we have a PHY, configure the phy */
 	/* NOTE: Boris-Ben Shapiro (2017-04-20): Must change phy addresses because phy_ethtool_sset() expectes the configured phy address
 	 * in cmd structure */
 	if (pl->phydev) {
-		pr_debug("Configuring MEDIA phy 0x%02x\n", cmd->phy_address);
 		phyadd = cmd->phy_address;
 		cmd->phy_address = pl->phydev->addr;
 		ret = phy_ethtool_sset(pl->phydev, cmd);
@@ -859,8 +825,7 @@ static int phylink_ethtool_sset(struct phylink *pl, struct ethtool_cmd *cmd)
 			return ret;
 		cmd->phy_address = phyadd;
 	}
-	pr_debug("will configure phy addr 0x%02x. cmd 0x%02x\n", pl->mdio_phy->addr, cmd->phy_address);
-	pr_debug("Configuring MDIO phy\n");
+
 	phyadd = cmd->phy_address;
 	cmd->phy_address = pl->mdio_phy->addr;
 	ret = phy_ethtool_sset(pl->mdio_phy, cmd);
@@ -875,7 +840,6 @@ static int phylink_ethtool_sset(struct phylink *pl, struct ethtool_cmd *cmd)
 	pl->link_config.duplex = cmd->duplex;
 	pl->link_config.an_enabled = cmd->autoneg != AUTONEG_DISABLE;
 
-	pr_debug("will call mac_config. speed %d, duplex %d, advertising 0x%08x, mode %s\n", cmd->speed, cmd->duplex, cmd->advertising, phylink_an_mode_str(pl->link_an_mode));
 	pl->ops->mac_config(pl->netdev, pl->link_an_mode, &pl->link_config);
 	pl->ops->mac_an_restart(pl->netdev, pl->link_an_mode);
 	mutex_unlock(&pl->state_mutex);
@@ -886,8 +850,6 @@ static int phylink_ethtool_sset(struct phylink *pl, struct ethtool_cmd *cmd)
 int phylink_ethtool_set_settings(struct phylink *pl, struct ethtool_cmd *cmd)
 {
 	int ret;
-
-	pr_debug("called. neg %d. mode %s", cmd->autoneg, phylink_an_mode_str(pl->link_an_mode));
 
 	if (cmd->autoneg != AUTONEG_DISABLE && cmd->autoneg != AUTONEG_ENABLE)
 		return -EINVAL;
@@ -1204,10 +1166,8 @@ EXPORT_SYMBOL_GPL(phylink_disable);
 
 void phylink_enable(struct phylink *pl)
 {
-	if (pl->mdio_phy) {
+	if (pl->mdio_phy)
 		phy_start(pl->mdio_phy);
-		netdev_dbg(pl->netdev, "will run resolve for phy 0x%02x and resolve phylink", (pl->mdio_phy != NULL) ? pl->mdio_phy->addr : 0x0);
-	}
 	clear_bit(PHYLINK_DISABLE_LINK, &pl->phylink_disable_state);
 	phylink_run_resolve(pl);
 }
@@ -1262,8 +1222,6 @@ int phylink_set_link_an_mode(struct phylink *pl, unsigned int mode)
 					phy_set_basex(pl->mdio_phy, false);
 					break;
 				}
-				netdev_dbg(pl->netdev, "mdio phy 0x%02x with %s. link %d", pl->mdio_phy->addr, (mode == MLO_AN_8023Z || mode == MLO_AN_100FX) ? "BASEX" : "SGMII", 
-											pl->link_config.link);
 				phy_start(pl->mdio_phy);
 			}
 
